@@ -3,6 +3,7 @@ import csv
 import re
 
 import threading
+from multiprocessing import Pool
 import time
 from os import remove, path, SEEK_END, unlink, mkdir
 import serial
@@ -184,6 +185,10 @@ class Bridge():
         :type data: Dictionary
         :return:
         """
+        if SESSION is not None:
+            return
+        if self.config["server_options"]["send_data"]:
+            return
         now = datetime.now()
         dt_string = now.strftime("%d_%m_%Y_temp")
         file_name = '{}_{}.csv'.format(dt_string, sensor['name'])
@@ -209,6 +214,9 @@ class Bridge():
         :rtype: Boolean
         """
         global SESSION
+        if not self.config["server_options"]["send_data"]:
+            return False
+
         if SESSION is None:
             return False
         url = '{}{}'.format(self.server_options['server'], sensor['name'])
@@ -242,6 +250,7 @@ class Bridge():
         :type sensor: Object
         :return:
         """
+
         global SESSION
         if SESSION is None:  # dont send if the user hasn't logged in
             return
@@ -383,8 +392,11 @@ class Bridge():
 
         sock.bind(('', self.basic_options['udp_port']))
 
+        pool = Pool(processes=5)
         while True:
             if STOP:
+                pool.close()
+                pool.join()
                 break
             data_b, addr = sock.recvfrom(4096)
             utc_time = datetime.now(timezone.utc).strftime("%m/%d/%Y %H:%M:%S.%f")
@@ -413,7 +425,7 @@ class Bridge():
                         self.process_location(data)
                     data = self.filter_data(data, self.udp_sensors[code])
                     # print (data)
-                    self.manage_data(data, sensor, show_no_internet_error)
+                    self.manage_data(data, sensor, show_no_internet_error, pool)
 
     def process_location(self, data):
         """
@@ -487,8 +499,13 @@ class Bridge():
 
             separator = DEFAULT_CONFIG[sensor['name']]['separator']
             header = sensor['header'].split(',')
+
+            pool = Pool(processes=5)
+
             while True:
                 if STOP:
+                    pool.close()
+                    pool.join()
                     break
                 utc_time = datetime.now(timezone.utc).strftime("%m/%d/%Y %H:%M:%S.%f")
                 c = a_serial.readline()
@@ -502,14 +519,14 @@ class Bridge():
 
                 data['datetime'] = utc_time
 
-                self.manage_data(data, sensor, show_no_internet_error)
+                self.manage_data(data, sensor, show_no_internet_error, pool)
                 # print (data)
         except:
             msg_with_time = self.create_log(traceback.format_exc(), sensor['name'])
             # print('Failed data: ', sensor['code'], data)
             # print(msg_with_time)
 
-    def manage_data(self, data, sensor, show_no_internet_error):
+    def manage_data(self, data, sensor, show_no_internet_error, pool):
         """
         Sends to the server and saves to a local file.
         If there is no internet, it saves it to a temporary file.
@@ -521,25 +538,22 @@ class Bridge():
         :type show_no_internet_error: Boolean
         :return:
         """
-        # print (SESSION,port_name,  data )
-        if SESSION is not None:
-            # if port_name == 'GPRMC':
-            # print ('sending 22', port_name, data)
-            if self.config["server_options"]["send_data"]:
-                self.send_to_server(sensor, data)
-        else:
-            # if port_name == 'GPRMC':
-            #     print ("SESSION ", SESSION, port_name)
-            # print(data)
-            if self.config["server_options"]["send_data"]:
-                self.save_to_temp_file(sensor, data)
-                show_no_internet_error = self.connect_to_server(sensor, show_no_internet_error)
-                # print (SESSION)
-                if show_no_internet_error:  # there is connection
-                    # send data that was not sent due to internet problem
-                    if SESSION is not None:
-                        self.send_temp_files_by_com(sensor)
-        self.save_to_file(sensor, data)
+
+        result0 = pool.apply_async(self.save_to_file, [sesnor, data])  # evaluate "solve1(A)" asynchronously
+        result1 = pool.apply_async(self.send_to_server, [sesnor, data])  # evaluate "solve1(A)" asynchronously
+        result2 = pool.apply_async(self.connect_to_server, [sensor, show_no_internet_error])  # evaluate "solve2(B)" asynchronously
+        result3 = pool.apply_async(self.save_to_temp_file, [sesnor, data])  # evaluate "solve1(A)" asynchronously
+
+        result0.get(timeout=10)
+        result1.get(timeout=10)
+        result2.get(timeout=10)
+        result3.get(timeout=10)
+
+        currentTime = datetime.now().strftime("%H%M%S.%f")
+        currentTimeFloat = round(float(currentTime))
+        if currentTimeFloat % 100 == 0:
+            result4 = pool.apply_async(self.send_temp_files_by_com, [sesnor])  # evaluate "solve1(A)" asynchronously
+            result4.get(timeout=10)
 
 
 class SensorsBridge(QDialog, Ui_SensorsBridge):
